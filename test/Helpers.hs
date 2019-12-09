@@ -1,25 +1,24 @@
-{-# language DataKinds #-}
-{-# language RankNTypes #-}
-{-# language ScopedTypeVariables #-}
+{-# LANGUAGE DataKinds           #-}
+{-# LANGUAGE RankNTypes          #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 module Helpers where
 
 import Hedgehog
 
-import Control.Lens.Fold ((^?), folded)
+import Control.Lens.Fold (folded, (^?))
 import Control.Monad (void)
-import Data.List.NonEmpty (NonEmpty(..))
+import Data.List.NonEmpty (NonEmpty (..))
 import Data.Semigroup (Semigroup)
 import Data.Text (Text)
-import Data.Validation (Validation(..), _Failure)
-import Text.Megaparsec.Pos (SourcePos(..), mkPos)
+import Data.Validation (Validation (..), _Failure)
+import Text.Megaparsec.Pos (SourcePos (..), mkPos)
 
-import Language.Python.Internal.Lexer
-  (SrcInfo, insertTabs, tokenize
-  )
+import Language.Python.Internal.Lexer (SrcInfo, insertTabs, tokenize)
+import Language.Python.Internal.Parse ()
+import Language.Python.Internal.Parse (runParser)
 import Language.Python.Internal.Token (PyToken)
 import Language.Python.Parse (Parser)
-import Language.Python.Parse.Error (ParseError, ErrorItem(..), _ParseError)
-import Language.Python.Internal.Parse (runParser)
+import Language.Python.Parse.Error (ErrorItem (..), ParseError, _ParseError)
 import Language.Python.Syntax.Expr (Expr)
 import Language.Python.Syntax.Module (Module)
 import Language.Python.Syntax.Statement (Statement)
@@ -29,7 +28,7 @@ doTokenize :: Monad m => Text -> PropertyT m [PyToken SrcInfo]
 doTokenize input =
   case tokenize "test" input of
     Left err -> annotateShow (err :: ParseError SrcInfo) *> failure
-    Right a -> pure a
+    Right a  -> pure a
 
 doTabs
   :: forall ann m
@@ -40,7 +39,7 @@ doTabs
 doTabs ann input =
   case insertTabs ann input of
     Left err -> annotateShow (err :: ParseError ann) *> failure
-    Right a -> pure a
+    Right a  -> pure a
 
 doParse :: Monad m => Parser a -> [PyToken SrcInfo] -> PropertyT m a
 doParse pa input = do

@@ -4,6 +4,7 @@
 {-# LANGUAGE LambdaCase             #-}
 {-# LANGUAGE MultiParamTypeClasses  #-}
 {-# LANGUAGE RankNTypes             #-}
+{-# LANGUAGE RecordWildCards        #-}
 {-# LANGUAGE TypeFamilies           #-}
 
 {-|
@@ -107,24 +108,26 @@ import Control.Lens.Getter (view, (^.))
 import Control.Lens.Prism (Prism')
 import Control.Lens.Review (( # ))
 import Control.Monad (void)
-import Data.Bifunctor (first, second)
+import Data.Bifunctor (bimap, first, second)
 import Data.Coerce (coerce)
 import Data.Function ((&))
 import Data.List (foldl')
-import Data.List.NonEmpty (NonEmpty, some1)
+import Data.List.NonEmpty (NonEmpty (..), nonEmpty, some1)
 import Data.Proxy (Proxy (..))
 import Data.Set (Set)
+import Data.Text (unpack)
 import Data.Void (Void)
 import GHC.Stack (HasCallStack)
-import Text.Megaparsec (MonadParsec, Parsec, SourcePos (..), Stream (..), eof,
-                        lookAhead, notFollowedBy, try, (<?>))
-import Text.Megaparsec.Char (satisfy)
+import Text.Megaparsec (MonadParsec, Parsec, PosState (..), SourcePos (..),
+                        Stream (..), eof, lookAhead, notFollowedBy, try, (<?>))
+import Text.Megaparsec (satisfy)
 
 
 import qualified Data.List.NonEmpty as NonEmpty
-import qualified Text.Megaparsec as Megaparsec
+import qualified Text.Megaparsec as Parsec
 
 import Language.Python.Internal.Lexer (SrcInfo (..), withSrcInfo)
+import Language.Python.Internal.Render as Render
 import Language.Python.Internal.Syntax.IR
 import Language.Python.Internal.Token
 import Language.Python.Syntax.Ann
@@ -141,7 +144,7 @@ import Language.Python.Syntax.Strings
 import Language.Python.Syntax.Whitespace
 
 newtype PyTokens = PyTokens { unPyTokens :: [PyToken SrcInfo] }
-  deriving (Eq, Ord)
+  deriving (Eq, Ord, Show)
 
 instance Stream PyTokens where
   type Token PyTokens = PyToken SrcInfo
@@ -151,44 +154,44 @@ instance Stream PyTokens where
   chunkToTokens Proxy = unPyTokens
   chunkLength Proxy = length . unPyTokens
   chunkEmpty Proxy = null . unPyTokens
-  positionAt1 Proxy _ tk =
-    let
-      ann = pyTokenAnn tk
-    in
-      SourcePos
-        (_srcInfoName ann)
-        (Megaparsec.mkPos $ _srcInfoLineStart ann)
-        (Megaparsec.mkPos $ _srcInfoColStart ann)
-  positionAtN Proxy spos (PyTokens tks) =
-    case tks of
-      [] -> spos
-      _ ->
-        let
-          ann = pyTokenAnn $ last tks
-        in
-          SourcePos
-            (_srcInfoName ann)
-            (Megaparsec.mkPos $ _srcInfoLineStart ann)
-            (Megaparsec.mkPos $ _srcInfoColStart ann)
-  advance1 Proxy _ _ tk =
-    let
-      ann = pyTokenAnn tk
-    in
-      SourcePos
-        (_srcInfoName ann)
-        (Megaparsec.mkPos $ _srcInfoLineEnd ann)
-        (Megaparsec.mkPos $ _srcInfoColEnd ann)
-  advanceN Proxy _ spos (PyTokens tks) =
-    case tks of
-      [] -> spos
-      _ ->
-        let
-          ann = pyTokenAnn $ last tks
-        in
-          SourcePos
-            (_srcInfoName ann)
-            (Megaparsec.mkPos $ _srcInfoLineEnd ann)
-            (Megaparsec.mkPos $ _srcInfoColEnd ann)
+  showTokens Proxy = unpack . Render.showTokens . NonEmpty.toList
+  reachOffset o PosState {..} =
+    ( newSourcePos
+    , prefix ++ restOfLine
+    , PosState
+        { pstateInput = PyTokens post
+        , pstateOffset = max pstateOffset o
+        , pstateSourcePos = newSourcePos
+        , pstateTabWidth = pstateTabWidth
+        , pstateLinePrefix = prefix
+        }
+    )
+    where
+      prefix =
+        if sameLine
+          then pstateLinePrefix ++ preStr
+          else preStr
+      sameLine = sourceLine newSourcePos == sourceLine pstateSourcePos
+      newSourcePos =
+        case post of
+          []    -> pstateSourcePos
+          (x:_) ->
+            let
+              ann = pyTokenAnn x
+            in
+              SourcePos
+              (_srcInfoName ann)
+              (Parsec.mkPos $ _srcInfoLineStart ann)
+              (Parsec.mkPos $ _srcInfoColStart ann)
+
+      (pre, post) = splitAt (o - pstateOffset) (unPyTokens pstateInput)
+      (preStr, postStr) = bimap showToks showToks $ splitAt tokensConsumed (unPyTokens pstateInput)
+      showToks toks =
+        case nonEmpty toks of
+          Nothing -> ""
+          Just l  -> unpack $ Render.showTokens (NonEmpty.toList l)
+      tokensConsumed = length pre
+      restOfLine = takeWhile (/= '\n') postStr
 
   take1_ (PyTokens p) =
     case p of
@@ -206,33 +209,41 @@ class AsParseError s t | s -> t where
   _ParseError
     :: Prism'
          s
-         ( NonEmpty SourcePos
-         , Maybe (Megaparsec.ErrorItem t)
-         , Set (Megaparsec.ErrorItem t)
+         ( Int
+         , Maybe (Parsec.ErrorItem t)
+         , Set (Parsec.ErrorItem t)
          )
 
--- | Convert a concrete 'Megaparsec.ParseError' to a value that has an instance of 'AsParseError'
+-- | Convert a concrete 'Parsec.ParseError' to a value that has an instance of 'AsParseError'
 --
--- This function is partial because our parser will never use 'Megaparsec.FancyError'
-unsafeFromParseError
-  :: (HasCallStack, AsParseError s t)
-  => Megaparsec.ParseError t e
-  -> s
-unsafeFromParseError Megaparsec.FancyError{} = error "there are none of these"
-unsafeFromParseError (Megaparsec.TrivialError pos a b) = _ParseError # (pos, a, b)
+-- This function is partial because our parser will never use 'Parsec.FancyError'
+-- unsafeFromParseError
+--   :: (HasCallStack, AsParseError s t)
+--   => Parsec.ParseError t e
+--   -> s
+unsafeFromParseError Parsec.FancyError{} = error "there are none of these"
+unsafeFromParseError (Parsec.TrivialError pos a b) = _ParseError # (pos, a, b)
+
+-- unbundleFirstError
+--   :: ( HasCallStack
+--      , AsParseError s t
+--      )
+--   => Parsec.ParseErrorBundle t Void -> s
+unbundleFirstError  (Parsec.ParseErrorBundle (err :| _)  _) =
+  unsafeFromParseError err
 
 type Parser = Parsec Void PyTokens
 
 -- | Run a parser on some input
 {-# inline runParser #-}
 runParser
-  :: AsParseError e (PyToken SrcInfo)
+  :: AsParseError e PyTokens
   => FilePath -- ^ File name
   -> Parser a -- ^ Parser
   -> [PyToken SrcInfo] -- ^ Input to parse
   -> Either e a
 runParser file p input =
-  first unsafeFromParseError $ Megaparsec.parse p file (PyTokens input)
+  first unbundleFirstError $ Parsec.parse p file (PyTokens input)
 
 eol :: MonadParsec e PyTokens m => m Newline
 eol =
@@ -325,6 +336,7 @@ stringOrBytes ws =
   fmap (\vs -> String (view annot_ $ NonEmpty.head vs) vs) . some1 $
   (\case
      TkString sp qt st val ann -> StringLiteral (Ann ann) sp qt st val
+     TkFormattedString sp qt st val ann -> FormattedStringLiteral (Ann ann) sp qt st val
      TkBytes sp qt st val ann -> BytesLiteral (Ann ann) sp qt st val
      TkRawString sp st qt val ann -> RawStringLiteral (Ann ann) sp st qt val
      TkRawBytes sp st qt val ann -> RawBytesLiteral (Ann ann) sp st qt val
@@ -332,6 +344,7 @@ stringOrBytes ws =
   satisfy
     (\case
         TkString{} -> True
+        TkFormattedString{} -> True
         TkBytes{} -> True
         TkRawString{} -> True
         TkRawBytes{} -> True

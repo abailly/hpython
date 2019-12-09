@@ -1,10 +1,10 @@
-resolver: lts-12.5
+resolver: lts-13.30
 packages:
 - .
 - 'hpython-test'
 
 extra-deps:
-- generic-lens-1.1.0.0
+#- generic-lens-1.1.0.0
 # - type-level-sets-0.8.7.0
 # - papa-0.3.1
 # - papa-base-0.3.1

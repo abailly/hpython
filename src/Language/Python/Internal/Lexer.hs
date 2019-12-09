@@ -1,11 +1,12 @@
-{-# language BangPatterns #-}
-{-# language TypeApplications #-}
-{-# language FunctionalDependencies, MultiParamTypeClasses #-}
-{-# language GeneralizedNewtypeDeriving #-}
-{-# language FlexibleContexts #-}
-{-# language TypeFamilies #-}
-{-# language OverloadedStrings #-}
-{-# language LambdaCase #-}
+{-# LANGUAGE BangPatterns               #-}
+{-# LANGUAGE FlexibleContexts           #-}
+{-# LANGUAGE FunctionalDependencies     #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE LambdaCase                 #-}
+{-# LANGUAGE MultiParamTypeClasses      #-}
+{-# LANGUAGE OverloadedStrings          #-}
+{-# LANGUAGE TypeApplications           #-}
+{-# LANGUAGE TypeFamilies               #-}
 
 {-|
 Module      : Language.Python.Internal.Lexer
@@ -31,12 +32,12 @@ module Language.Python.Internal.Lexer
   )
 where
 
-import Control.Applicative ((<|>), many, optional)
+import Control.Applicative (many, optional, (<|>))
 import Control.Lens.Getter ((^.))
 import Control.Lens.Iso (from)
 import Control.Lens.Prism (Prism')
-import Control.Lens.Review ((#))
-import Control.Monad ((<=<), when, replicateM)
+import Control.Lens.Review (( # ))
+import Control.Monad (replicateM, when, (<=<))
 import Control.Monad.Except (throwError)
 import Control.Monad.State (StateT, evalStateT, get, modify, put)
 import Data.Bifunctor (first)
@@ -45,30 +46,28 @@ import Data.Digit.Class.D0 (parse0)
 import Data.Digit.Decimal (parseDecimal, parseDecimalNoZero)
 import Data.Digit.Hexadecimal.MixedCase (parseHeXaDeCiMaL)
 import Data.Digit.Octal (parseOctal)
-import Data.FingerTree (FingerTree, Measured(..))
+import Data.FingerTree (FingerTree, Measured (..))
 import Data.Foldable (asum)
 import Data.Functor.Identity (Identity)
-import Data.List.NonEmpty (NonEmpty(..), some1)
-import Data.Monoid (Sum(..))
-import Data.Set (Set)
+import Data.List.NonEmpty (NonEmpty (..), some1)
+import Data.Monoid (Sum (..))
 import Data.Semigroup (Semigroup, (<>))
 import Data.Semigroup.Foldable (foldMap1)
-import Data.These (These(..))
+import Data.Set (Set)
+import Data.These (These (..))
 import Data.Void (Void)
 import GHC.Stack (HasCallStack)
 import Text.Megaparsec (MonadParsec, ParseError, parse, unPos)
-import Text.Megaparsec.Parsers
-  ( ParsecT, CharParsing, LookAheadParsing, lookAhead, unParsecT, satisfy, text
-  , char, manyTill, try
-  , notFollowedBy, anyChar, digit, oneOf
-  )
+import Text.Megaparsec.Parsers (CharParsing, LookAheadParsing, ParsecT, anyChar,
+                                char, digit, lookAhead, manyTill, notFollowedBy,
+                                oneOf, satisfy, text, try, unParsecT)
 
 import qualified Data.FingerTree as FingerTree
 import qualified Data.List.NonEmpty as NonEmpty
 import qualified Data.Text as Text
 import qualified Text.Megaparsec as Parsec
 
-import Language.Python.Internal.Token (PyToken(..), pyTokenAnn)
+import Language.Python.Internal.Token (PyToken (..), pyTokenAnn)
 import Language.Python.Syntax.Ann
 import Language.Python.Syntax.Comment
 import Language.Python.Syntax.Ident
@@ -78,13 +77,13 @@ import Language.Python.Syntax.Whitespace
 
 data SrcInfo
   = SrcInfo
-  { _srcInfoName :: FilePath
-  , _srcInfoLineStart :: !Int
-  , _srcInfoLineEnd :: !Int
-  , _srcInfoColStart :: !Int
-  , _srcInfoColEnd :: !Int
+  { _srcInfoName        :: FilePath
+  , _srcInfoLineStart   :: !Int
+  , _srcInfoLineEnd     :: !Int
+  , _srcInfoColStart    :: !Int
+  , _srcInfoColEnd      :: !Int
   , _srcInfoOffsetStart :: !Int
-  , _srcInfoOffsetEnd :: !Int
+  , _srcInfoOffsetEnd   :: !Int
   }
   deriving (Eq, Show)
 
@@ -100,11 +99,11 @@ withSrcInfo :: MonadParsec e s m => m (SrcInfo -> a) -> m a
 withSrcInfo m =
   (\(Parsec.SourcePos name l c) o f (Parsec.SourcePos _ l' c') o' ->
      f $ SrcInfo name (unPos l) (unPos l') (unPos c) (unPos c') o o') <$>
-  Parsec.getPosition <*>
-  Parsec.getTokensProcessed <*>
+  Parsec.getSourcePos <*>
+  Parsec.getOffset <*>
   m <*>
-  Parsec.getPosition <*>
-  Parsec.getTokensProcessed
+  Parsec.getSourcePos <*>
+  Parsec.getOffset
 
 newline :: CharParsing m => m Newline
 newline = LF <$ char '\n' <|> char '\r' *> (CRLF <$ char '\n' <|> pure CR)
@@ -117,30 +116,32 @@ parseComment =
   (\a b -> TkComment (MkComment (Ann b) a)) <$ char '#' <*>
   many (satisfy (`notElem` ['\r', '\n']))
 
+data Prefixes = SP StringPrefix
+              | RSP RawStringPrefix
+              | BP BytesPrefix
+              | RBP RawBytesPrefix
+              | FP FormattedPrefix
+
 stringOrBytesPrefix
   :: CharParsing m
-  => m (Either
-          (Either RawStringPrefix StringPrefix)
-          (Either RawBytesPrefix BytesPrefix))
+  => m Prefixes
 stringOrBytesPrefix =
-  (char 'r' *>
-   (Right (Left Prefix_rb) <$ char 'b' <|>
-    Right (Left Prefix_rB) <$ char 'B' <|>
-    pure (Left $ Left Prefix_r))) <|>
-  (char 'R' *>
-   (Right (Left Prefix_Rb) <$ char 'b' <|>
-    Right (Left Prefix_RB) <$ char 'B' <|>
-    pure (Left $ Left Prefix_R))) <|>
-  (char 'b' *>
-   (Right (Left Prefix_br) <$ char 'r' <|>
-    Right (Left Prefix_bR) <$ char 'R' <|>
-    pure (Right $ Right Prefix_b))) <|>
-  (char 'B' *>
-   (Right (Left Prefix_Br) <$ char 'r' <|>
-    Right (Left Prefix_BR) <$ char 'R' <|>
-    pure (Right $ Right Prefix_B))) <|>
-  (Left (Right Prefix_u) <$ char 'u') <|>
-  (Left (Right Prefix_U) <$ char 'U')
+  (text "rb" *> pure (RBP Prefix_rb)) <|>
+  (text "rB" *> pure (RBP Prefix_rB)) <|>
+  (text "Rb" *> pure (RBP Prefix_Rb)) <|>
+  (text "RB" *> pure (RBP Prefix_RB)) <|>
+  (text "br" *> pure (RBP Prefix_br)) <|>
+  (text "bR" *> pure (RBP Prefix_bR)) <|>
+  (text "BR" *> pure (RBP Prefix_BR)) <|>
+  (text "Br" *> pure (RBP Prefix_Br)) <|>
+  (char 'b' *> pure (BP Prefix_b)) <|>
+  (char 'B' *> pure (BP Prefix_B)) <|>
+  (char 'r' *> pure (RSP Prefix_r)) <|>
+  (char 'R' *> pure (RSP Prefix_R)) <|>
+  (char 'f' *> pure (FP Prefix_f)) <|>
+  (char 'F' *> pure (FP Prefix_F)) <|>
+  (char 'u' *> pure (SP Prefix_u)) <|>
+  (char 'U' *> pure (SP Prefix_U))
 
 rawStringChar :: CharParsing m => m [PyChar]
 rawStringChar =
@@ -217,9 +218,9 @@ number = do
                    f = FloatLiteralFull (Ann ann) n $
                      case (a, b) of
                        (Nothing, Nothing) -> Nothing
-                       (Just x, Nothing) -> Just $ This x
-                       (Nothing, Just x) -> Just $ That x
-                       (Just x, Just y) -> Just $ These x y
+                       (Just x, Nothing)  -> Just $ This x
+                       (Nothing, Just x)  -> Just $ That x
+                       (Just x, Just y)   -> Just $ These x y
                  in
                    maybe (TkFloat f) (TkImag . ImagLiteralFloat (Ann ann) f) j) <$>
           optional
@@ -265,9 +266,9 @@ number = do
                f = FloatLiteralFull (Ann ann) (z :| n') $
                  case (b, c) of
                    (Nothing, Nothing) -> Nothing
-                   (Just x, Nothing) -> Just $ This x
-                   (Nothing, Just x) -> Just $ That x
-                   (Just x, Just y) -> Just $ These x y
+                   (Just x, Nothing)  -> Just $ This x
+                   (Nothing, Just x)  -> Just $ That x
+                   (Just x, Just y)   -> Just $ These x y
              in
                maybe (TkFloat f) (TkImag . ImagLiteralFloat (Ann ann) f) j
            Left (Right (x, j)) ->
@@ -385,6 +386,8 @@ parseToken =
     , TkComma <$ char ','
     , TkDot <$ char '.'
     , do
+        -- string literal between double quotes, either a single on or 3 double quotes
+        -- (""" ... """) for string embedding new-lines
         sp <- try $ optional stringOrBytesPrefix <* char '"'
         case sp of
           Nothing ->
@@ -393,33 +396,41 @@ parseToken =
             manyTill stringChar (text "\"\"\"")
             <|>
             TkString Nothing ShortString DoubleQuote <$> manyTill stringChar (char '"')
-          Just (Left (Left prefix)) ->
+          Just (RSP prefix) ->
             TkRawString prefix LongString DoubleQuote . concat <$
             text "\"\"" <*>
             manyTill rawStringChar (text "\"\"\"")
             <|>
             TkRawString prefix ShortString DoubleQuote . concat <$>
             manyTill rawStringChar (char '"')
-          Just (Left (Right prefix)) ->
+          Just (SP prefix) ->
             TkString (Just prefix) LongString DoubleQuote <$
             text "\"\"" <*>
             manyTill stringChar (text "\"\"\"")
             <|>
             TkString (Just prefix) ShortString DoubleQuote <$> manyTill stringChar (char '"')
-          Just (Right (Left prefix)) ->
+          Just (RBP prefix) ->
             TkRawBytes prefix LongString DoubleQuote . concat <$
             text "\"\"" <*>
             manyTill rawStringChar (text "\"\"\"")
             <|>
             TkRawBytes prefix ShortString DoubleQuote . concat <$>
             manyTill rawStringChar (char '"')
-          Just (Right (Right prefix)) ->
+          Just (BP prefix) ->
             TkBytes prefix LongString DoubleQuote <$
             text "\"\"" <*>
             manyTill stringChar (text "\"\"\"")
             <|>
             TkBytes prefix ShortString DoubleQuote <$> manyTill stringChar (char '"')
+          Just (FP prefix) ->
+            TkFormattedString prefix LongString DoubleQuote <$
+            text "\"\"" <*>
+            manyTill stringChar (text "\"\"\"")
+            <|>
+            TkFormattedString prefix ShortString DoubleQuote <$> manyTill stringChar (char '"')
     , do
+        -- string literal between single quotes, either one or 3 double  quotes
+        -- (''' ... ''') for string embedding new-lines
         sp <- try $ optional stringOrBytesPrefix <* char '\''
         case sp of
           Nothing ->
@@ -428,32 +439,38 @@ parseToken =
             manyTill stringChar (text "'''")
             <|>
             TkString Nothing ShortString SingleQuote <$> manyTill stringChar (char '\'')
-          Just (Left (Left prefix)) ->
+          Just (RSP prefix) ->
             TkRawString prefix LongString SingleQuote . concat <$
             text "''" <*>
             manyTill rawStringChar (text "'''")
             <|>
             TkRawString prefix ShortString SingleQuote . concat <$>
             manyTill rawStringChar (char '\'')
-          Just (Left (Right prefix)) ->
+          Just (SP prefix) ->
             TkString (Just prefix) LongString SingleQuote <$
             text "''" <*>
             manyTill stringChar (text "'''")
             <|>
             TkString (Just prefix) ShortString SingleQuote <$> manyTill stringChar (char '\'')
-          Just (Right (Left prefix)) ->
+          Just (RBP prefix) ->
             TkRawBytes prefix LongString SingleQuote . concat <$
             text "''" <*>
             manyTill rawStringChar (text "'''")
             <|>
             TkRawBytes prefix ShortString SingleQuote . concat <$>
             manyTill rawStringChar (char '\'')
-          Just (Right (Right prefix)) ->
+          Just (BP  prefix) ->
             TkBytes prefix LongString SingleQuote <$
             text "''" <*>
             manyTill stringChar (text "'''")
             <|>
             TkBytes prefix ShortString SingleQuote <$> manyTill stringChar (char '\'')
+          Just (FP prefix) ->
+            TkFormattedString prefix LongString SingleQuote <$
+            text "''" <*>
+            manyTill stringChar (text "'''")
+            <|>
+            TkFormattedString prefix ShortString SingleQuote <$> manyTill stringChar (char '\'')
     , fmap TkIdent $
       (:) <$>
       satisfy isIdentifierStart <*>
@@ -464,9 +481,9 @@ class AsLexicalError s t | s -> t where
   _LexicalError
     :: Prism'
          s
-         ( NonEmpty Parsec.SourcePos
-         , Maybe (Parsec.ErrorItem t)
-         , Set (Parsec.ErrorItem t)
+         ( Int
+         , Maybe (Parsec.ErrorItem (Parsec.Token t))
+         , Set (Parsec.ErrorItem (Parsec.Token t))
          )
 
 -- | Convert a concrete 'ParseError' to a value that has an instance of 'AsLexicalError'
@@ -481,15 +498,24 @@ unsafeFromLexicalError
 unsafeFromLexicalError (Parsec.TrivialError a b c) = _LexicalError # (a, b, c)
 unsafeFromLexicalError Parsec.FancyError{} = error "'fancy error' used in lexer"
 
+unbundleFirstError
+  :: ( HasCallStack
+     , AsLexicalError s t
+     )
+  => Parsec.ParseErrorBundle t Void -> s
+unbundleFirstError  (Parsec.ParseErrorBundle (err :| _)  _) =
+  unsafeFromLexicalError err
+
+
 {-# noinline tokenize #-}
 -- | Convert some input to a sequence of tokens. Indent and dedent tokens are not added
 -- (see 'insertTabs')
 tokenize
-  :: AsLexicalError e Char
+  :: AsLexicalError e Text.Text
   => FilePath -- ^ File name
   -> Text.Text -- ^ Input to tokenize
   -> Either e [PyToken SrcInfo]
-tokenize fp = first unsafeFromLexicalError . parse (unParsecT tokens) fp
+tokenize fp = first unbundleFirstError . parse (unParsecT tokens) fp
   where
     tokens :: ParsecT Void Text.Text Identity [PyToken SrcInfo]
     tokens = many parseToken <* Parsec.eof
@@ -507,13 +533,13 @@ data LogicalLine a
 
 logicalLineToTokens :: LogicalLine a -> [PyToken a]
 logicalLineToTokens (LogicalLine _ _ ts m) = ts <> maybe [] pure m
-logicalLineToTokens (BlankLine ts m) = ts <> maybe [] pure m
+logicalLineToTokens (BlankLine ts m)       = ts <> maybe [] pure m
 
 spaceToken :: PyToken a -> Maybe Whitespace
-spaceToken TkSpace{} = Just Space
-spaceToken TkTab{} = Just Tab
+spaceToken TkSpace{}          = Just Space
+spaceToken TkTab{}            = Just Tab
 spaceToken (TkContinued nl _) = Just $ Continued nl []
-spaceToken _ = Nothing
+spaceToken _                  = Nothing
 
 collapseContinue :: [(PyToken a, Whitespace)] -> [([PyToken a], Whitespace)]
 collapseContinue [] = []
@@ -537,7 +563,7 @@ spanMaybe f as =
     x : xs ->
       case f x of
         Nothing -> ([], as)
-        Just b -> first (b :) $ spanMaybe f xs
+        Just b  -> first (b :) $ spanMaybe f xs
 
 -- | Acts like break, but encodes the "insignificant whitespace" rule for parens, braces
 -- and brackets
@@ -575,7 +601,7 @@ logicalLines tks =
      else
        LogicalLine
          (case tks of
-           [] -> error "couldn't generate annotation for logical line"
+           []     -> error "couldn't generate annotation for logical line"
            tk : _ -> pyTokenAnn tk)
          (spaces' >>= fst, fmap snd spaces' ^. from indentWhitespaces)
          line
@@ -590,11 +616,11 @@ data IndentedLine a
   deriving (Eq, Show)
 
 isBlankToken :: PyToken a -> Bool
-isBlankToken TkSpace{} = True
-isBlankToken TkTab{} = True
+isBlankToken TkSpace{}   = True
+isBlankToken TkTab{}     = True
 isBlankToken TkComment{} = True
 isBlankToken TkNewline{} = True
-isBlankToken _ = False
+isBlankToken _           = False
 
 data TabError a
   -- | Tabs and spaces were used inconsistently
@@ -628,7 +654,7 @@ fromTabError
      , AsIncorrectDedent s a
      )
   => TabError a -> s
-fromTabError (TabError a) = _TabError # a
+fromTabError (TabError a)        = _TabError # a
 fromTabError (IncorrectDedent a) = _IncorrectDedent # a
 
 indentation :: Semigroup a => a -> [LogicalLine a] -> Either (TabError a) [IndentedLine a]
@@ -655,7 +681,7 @@ indentation ann lls =
       when (n `notElem` fmap (indentLevel . snd) (NonEmpty.toList is)) .
         throwError $ IncorrectDedent ann
       put $ case remainder of
-        [] -> error "I don't know whether this can happen"
+        []     -> error "I don't know whether this can happen"
         x : xs -> x :| xs
       pure $ replicate (length popped) (Dedent ann)
 
@@ -681,9 +707,9 @@ indentation ann lls =
         ili = indentLevel i
         levelIndent =
           case (spTks, spcs ^. indentWhitespaces) of
-            ([], []) -> []
+            ([], [])     -> []
             (x:xs, y:ys) -> [ Level (y:|ys) (foldMap1 pyTokenAnn $ x:|xs) ]
-            _ -> error "impossible"
+            _            -> error "impossible"
       case compare ilSpcs ili of
         LT -> (<> (levelIndent <> [IndentedLine ll])) <$> dedents ann ilSpcs
         EQ ->
@@ -733,7 +759,7 @@ chunked = go FingerTree.empty
         TkIndent a (Indents (splitIndents leaps' i) (Ann a)) : go leaps' is
     go leaps (Dedent a : is) =
       case FingerTree.viewr leaps of
-        FingerTree.EmptyR -> error "impossible"
+        FingerTree.EmptyR      -> error "impossible"
         leaps' FingerTree.:> _ -> TkDedent a : go leaps' is
     go leaps (IndentedLine ll : is) = logicalLineToTokens ll <> go leaps is
     go leaps (Level i a : is) =
@@ -759,7 +785,7 @@ insertTabs a =
 -- | Tokenize an input file, inserting indent\/level\/dedent tokens in appropriate
 -- positions according to the block structure.
 tokenizeWithTabs
-  :: ( AsLexicalError s Char
+  :: ( AsLexicalError s Text.Text
      , AsTabError s SrcInfo
      , AsIncorrectDedent s SrcInfo
      )
